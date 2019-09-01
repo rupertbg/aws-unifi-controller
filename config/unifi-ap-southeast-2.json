@@ -1,0 +1,12 @@
+{
+  "Parameters": {
+    "ManagementIpAddress": "",
+    "ExternalSubnetIds": "",
+    "InternalSubnetIds": "",
+    "VpcId": "",
+    "LoadBalancerCertArn": "",
+    "HostedZoneId": "",
+    "DomainName": "",
+    "KeyName": "",
+  }
+}

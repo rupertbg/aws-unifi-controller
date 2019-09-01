@@ -1,0 +1,441 @@
+Parameters:
+
+  ManagementIpAddress:
+    Type: String
+    Description: The IP address to whitelist for access to the controllers
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: The VPC to use
+
+  ExternalSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: List of subnets where the Network Load Balancer will reside
+
+  InternalSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: List of subnets where Unifi controllers will reside
+
+  UbuntuImageId:
+    Type: AWS::EC2::Image::Id
+    Default: ami-000c2343cf03d7fd7
+    Description: AMI ID for latest Ubuntu 16.04
+
+  InstanceType:
+    Type: String
+    Description: Instance size for the controllers
+    Default: t3a.micro
+    AllowedValues:
+      - t3a.micro
+      - t3.micro
+
+  LoadBalancerCertArn:
+    Type: String
+    Description: >-
+      ARN of ACM Certificate for TLS on the Network Load Balancer
+      where applicable
+
+  HostedZoneId:
+    Type: String
+    Description: Route53 Hosted Zone ID for the Domain name
+
+  DomainName:
+    Type: String
+    Description: Domain name to use for the load balancer
+
+  KeyName:
+    Type: String
+    Description: EC2 Key Pair name for SSH access to controllers
+
+Resources:
+
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Comment: !Ref AWS::StackName
+      Name: !Ref DomainName
+      TTL: 300
+      Type: CNAME
+      ResourceRecords:
+        - !GetAtt LoadBalancer.DNSName
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      IpAddressType: ipv4
+      LoadBalancerAttributes:
+        - Key: load_balancing.cross_zone.enabled
+          Value: true
+      Scheme: internet-facing
+      Subnets: !Ref ExternalSubnetIds
+      Type: network
+
+  Listener22:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ControllerTarget22
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 22
+      Protocol: TCP
+
+  Listener8080:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ControllerTarget8080
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 8080
+      Protocol: TCP
+
+  Listener8443:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Certificates:
+        - CertificateArn: !Ref LoadBalancerCertArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ControllerTarget8443
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 8443
+      Protocol: TLS
+
+  Listener8843:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Certificates:
+        - CertificateArn: !Ref LoadBalancerCertArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ControllerTarget8843
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 8843
+      Protocol: TLS
+
+  Listener8880:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ControllerTarget8880
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 8880
+      Protocol: TCP
+
+  Listener6789:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ControllerTarget6789
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 6789
+      Protocol: TCP
+
+  Listener3478:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ControllerTarget3478
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 3478
+      Protocol: UDP
+
+  Listener5656:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ControllerTarget5656
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 5656
+      Protocol: UDP
+
+  EFS:
+    Type: AWS::EFS::FileSystem
+
+  EFSMountTarget:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFS
+      SecurityGroups:
+        - !GetAtt EFSSecurityGroup.GroupId
+      SubnetId: !Select [ 0, !Ref InternalSubnetIds ]
+
+  BackupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - backup.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonElasticFileSystemFullAccess
+
+  BackupVault:
+    Type: AWS::Backup::BackupVault
+    Properties:
+      BackupVaultName: !Ref AWS::StackName
+
+  BackupPlan:
+    DependsOn: BackupVault
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Ref AWS::StackName
+        BackupPlanRule:
+          - RuleName: Daily
+            TargetBackupVault: !Ref BackupVault
+            ScheduleExpression: cron(0 0 * * ? *)
+
+  BackupSelection:
+    DependsOn: BackupPlan
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref BackupPlan
+      BackupSelection:
+        SelectionName: !Ref AWS::StackName
+        IamRoleArn: !GetAtt BackupRole.Arn
+        Resources:
+          - !Sub arn:aws:elasticfilesystem:${AWS::Region}:${AWS::AccountId}:file-system/${EFS}
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref UbuntuImageId
+        InstanceInitiatedShutdownBehavior: terminate
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyName
+        SecurityGroupIds:
+          - !GetAtt SecurityGroup.GroupId
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: unifi-controller
+        UserData:
+          Fn::Base64:
+            !Sub |
+              #cloud-config
+              repo_update: true
+              repo_upgrade: all
+              runcmd:
+                # General
+                - apt update -y;
+                - apt upgrade -y;
+                - apt install awscli ca-certificates apt-transport-https -y;
+
+                # EFS tools
+                - git clone https://github.com/aws/efs-utils;
+                - apt install binutils -y;
+                - cd efs-utils;
+                - ./build-deb.sh;
+                - apt install ./build/amazon-efs-utils*deb -y;
+                - cd;
+
+                # Mount EFS
+                - file_system_id_01=${EFS};
+                - efs_directory=/var/lib/unifi;
+                - mkdir -p $efs_directory;
+                - echo "$file_system_id_01:/ $efs_directory efs tls,_netdev" >> /etc/fstab;
+                - mount -a -t efs defaults;
+
+                # Unifi
+                - echo 'deb https://www.ui.com/downloads/unifi/debian stable ubiquiti' | sudo tee /etc/apt/sources.list.d/100-ubnt-unifi.list;
+                - apt-key adv --keyserver keyserver.ubuntu.com --recv 06E85760C0A52C50;
+                - apt update -y;
+                - apt purge java* -y;
+                - apt install default-jre -y;
+                - echo "unifi unifi/has_backup boolean true" | debconf-set-selections;
+                - DEBIAN_FRONTEND=noninteractive apt-get install unifi -y;
+
+  AutoUpdateScaleUp:
+    Type: AWS::AutoScaling::ScheduledAction
+    Properties:
+      AutoScalingGroupName: !Ref ControllerGroup
+      DesiredCapacity: 2
+      MinSize: 1
+      MaxSize: 2
+      Recurrence: '0 14 * * *'
+
+  AutoUpdateScaleDown:
+    Type: AWS::AutoScaling::ScheduledAction
+    Properties:
+      AutoScalingGroupName: !Ref ControllerGroup
+      DesiredCapacity: 1
+      MinSize: 1
+      MaxSize: 2
+      Recurrence: '10 14 * * *'
+
+  ControllerGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref InternalSubnetIds
+      DesiredCapacity: 1
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MaxSize: 2
+      MinSize: 1
+      TargetGroupARNs:
+        - !Ref ControllerTarget22
+        - !Ref ControllerTarget8080
+        - !Ref ControllerTarget8443
+        - !Ref ControllerTarget8843
+        - !Ref ControllerTarget8880
+        - !Ref ControllerTarget6789
+        - !Ref ControllerTarget3478
+        - !Ref ControllerTarget5656
+
+  ControllerTarget22:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckPort: 22
+      HealthCheckProtocol: TCP
+      Protocol: TCP
+      Port: 22
+      TargetType: instance
+      VpcId: !Ref VpcId
+
+  ControllerTarget8080:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckPort: 22
+      HealthCheckProtocol: TCP
+      Protocol: TCP
+      Port: 8080
+      TargetType: instance
+      VpcId: !Ref VpcId
+
+  ControllerTarget8443:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckPort: 22
+      HealthCheckProtocol: TCP
+      Protocol: TLS
+      Port: 8443
+      TargetType: instance
+      VpcId: !Ref VpcId
+
+  ControllerTarget8843:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckPort: 22
+      HealthCheckProtocol: TCP
+      Protocol: TLS
+      Port: 8843
+      TargetType: instance
+      VpcId: !Ref VpcId
+
+  ControllerTarget8880:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckPort: 22
+      HealthCheckProtocol: TCP
+      Protocol: TCP
+      Port: 8880
+      TargetType: instance
+      VpcId: !Ref VpcId
+
+  ControllerTarget6789:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckPort: 22
+      HealthCheckProtocol: TCP
+      Protocol: TCP
+      Port: 6789
+      TargetType: instance
+      VpcId: !Ref VpcId
+
+  ControllerTarget3478:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckPort: 22
+      HealthCheckProtocol: TCP
+      Protocol: UDP
+      Port: 3478
+      TargetType: instance
+      VpcId: !Ref VpcId
+
+  ControllerTarget5656:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckPort: 22
+      HealthCheckProtocol: TCP
+      Protocol: UDP
+      Port: 5656
+      TargetType: instance
+      VpcId: !Ref VpcId
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: Unifi Security Group
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 10.254.1.0/24
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 10.254.2.0/24
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 10.254.3.0/24
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Sub ${ManagementIpAddress}/32
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: !Sub ${ManagementIpAddress}/32
+        - IpProtocol: tcp
+          FromPort: 8443
+          ToPort: 8443
+          CidrIp: !Sub ${ManagementIpAddress}/32
+        - IpProtocol: tcp
+          FromPort: 8843
+          ToPort: 8843
+          CidrIp: !Sub ${ManagementIpAddress}/32
+        - IpProtocol: tcp
+          FromPort: 8880
+          ToPort: 8880
+          CidrIp: !Sub ${ManagementIpAddress}/32
+        - IpProtocol: tcp
+          FromPort: 6789
+          ToPort: 6789
+          CidrIp: !Sub ${ManagementIpAddress}/32
+        - IpProtocol: udp
+          FromPort: 3478
+          ToPort: 3478
+          CidrIp: !Sub ${ManagementIpAddress}/32
+        - IpProtocol: udp
+          FromPort: 5656
+          ToPort: 5699
+          CidrIp: !Sub ${ManagementIpAddress}/32
+
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: EFS Security Group
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          SourceSecurityGroupId: !GetAtt SecurityGroup.GroupId
